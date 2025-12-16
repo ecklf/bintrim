@@ -14,6 +14,10 @@ A CLI utility for stripping legacy <code>x86_64</code> architecture from macOS u
 
 ![bintrim app](public/app.png)
 
+> [!IMPORTANT]
+> Trimming may break your application. I did not have any issues during testing, but this software is new. \
+> Please proceed at your own risk.
+
 ## Installation
 
 ```bash
