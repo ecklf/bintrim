@@ -6,7 +6,7 @@
 </p>
 
 <div align="center">
-A CLI utility for stripping legacy `x86_64` architecture from macOS universal binaries
+A CLI utility for stripping legacy <code>x86_64</code> architecture from macOS universal binaries
 </div>
 
 <br/>
