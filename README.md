@@ -30,11 +30,3 @@ brew install ecklf/bintrim/bintrim
 ## License
 
 MIT
-
-<details><summary>Release</summary>
-```sh
-git tag v0.1.0
-git push origin v0.1.0
-curl -sL https://github.com/ecklf/bintrim/archive/refs/tags/v0.1.0.tar.gz | shasum -a 256
-```
-</details>
