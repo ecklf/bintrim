@@ -31,6 +31,12 @@ enum AppState {
     Trimming,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SortMode {
+    Size,
+    Alphabetical,
+}
+
 /// The main application which holds the state and logic of the application.
 pub struct App {
     /// Is the application running?
@@ -43,8 +49,6 @@ pub struct App {
     state: AppState,
     /// List state for scrolling
     list_state: ListState,
-    /// Loading spinner frame
-    loading_frame: usize,
     /// Current scan progress
     scan_progress: usize,
     /// Total items to scan
@@ -61,6 +65,10 @@ pub struct App {
     trim_result_state: Option<Arc<Mutex<Option<Vec<AppInfo>>>>>,
     /// Password input buffer
     password_input: String,
+    /// Show non-toggleable apps
+    show_non_toggleable: bool,
+    /// Current sort mode
+    sort_mode: SortMode,
 }
 
 impl Default for App {
@@ -78,7 +86,6 @@ impl App {
             selected_index: 0,
             state: AppState::Loading,
             list_state: ListState::default(),
-            loading_frame: 0,
             scan_progress: 0,
             scan_total: 0,
             trim_progress: 0,
@@ -87,6 +94,8 @@ impl App {
             trim_progress_state: None,
             trim_result_state: None,
             password_input: String::new(),
+            show_non_toggleable: false,
+            sort_mode: SortMode::Size,
         }
     }
 
@@ -118,6 +127,14 @@ impl App {
                     && let Some(apps) = result.take()
                 {
                     self.apps = apps;
+                    self.sort_apps();
+                    // Start with first prunable app selected
+                    for (i, app) in self.apps.iter().enumerate() {
+                        if app.has_x86_64() {
+                            self.selected_index = i;
+                            break;
+                        }
+                    }
                     self.state = AppState::Ready;
                 }
             }
@@ -131,18 +148,30 @@ impl App {
                 }
 
                 // Check if trimming is complete
-                let trimming_done = if let Some(ref result_state) = self.trim_result_state {
+                let new_apps = if let Some(ref result_state) = self.trim_result_state {
                     if let Ok(mut result) = result_state.lock() {
-                        if let Some(apps) = result.take() {
-                            self.apps = apps;
-                            self.selected_index = 0;
-                            true
-                        } else {
-                            false
-                        }
+                        result.take()
                     } else {
-                        false
+                        None
                     }
+                } else {
+                    None
+                };
+
+                let trimming_done = if let Some(apps) = new_apps {
+                    self.apps = apps;
+                    self.sort_apps();
+                    self.selected_index = 0;
+                    // Find first prunable app if not showing all
+                    if !self.show_non_toggleable {
+                        for (i, app) in self.apps.iter().enumerate() {
+                            if app.has_x86_64() {
+                                self.selected_index = i;
+                                break;
+                            }
+                        }
+                    }
+                    true
                 } else {
                     false
                 };
@@ -170,10 +199,6 @@ impl App {
 
         match self.state {
             AppState::Loading => {
-                let spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-                let spinner = spinner_frames[self.loading_frame % spinner_frames.len()];
-                self.loading_frame += 1;
-
                 let vertical_chunks = Layout::vertical([
                     Constraint::Percentage(40),
                     Constraint::Length(8),
@@ -197,26 +222,28 @@ impl App {
                     0.0
                 };
 
-                let title = if self.scan_total > 0 {
-                    format!(
-                        "{} Scanning {}/{}",
-                        spinner, self.scan_progress, self.scan_total
+                let label = if self.scan_total > 0 {
+                    Span::styled(
+                        format!(
+                            "{}/{} ({:.0}%)",
+                            self.scan_progress,
+                            self.scan_total,
+                            progress_ratio * 100.0
+                        ),
+                        Style::default().add_modifier(Modifier::BOLD),
                     )
                 } else {
-                    format!("{} Initializing scan...", spinner)
+                    Span::styled(
+                        "Initializing...",
+                        Style::default().add_modifier(Modifier::ITALIC),
+                    )
                 };
 
-                frame.render_widget(
-                    Paragraph::new(title)
-                        .style(Style::default().fg(Color::Cyan))
-                        .centered(),
-                    content[0],
-                );
-
                 let gauge = Gauge::default()
-                    .block(Block::default().borders(Borders::ALL).title("BinTrim"))
-                    .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
-                    .ratio(progress_ratio);
+                    .block(Block::default().borders(Borders::ALL).title("Scanning"))
+                    .gauge_style(Style::default().fg(Color::White).bg(Color::Black))
+                    .ratio(progress_ratio)
+                    .label(label);
 
                 frame.render_widget(gauge, content[1]);
             }
@@ -263,10 +290,6 @@ impl App {
                 self.render_password_popup(frame, area);
             }
             AppState::Trimming => {
-                let spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-                let spinner = spinner_frames[self.loading_frame % spinner_frames.len()];
-                self.loading_frame += 1;
-
                 let vertical_chunks = Layout::vertical([
                     Constraint::Percentage(40),
                     Constraint::Length(8),
@@ -290,29 +313,48 @@ impl App {
                 };
 
                 let title = if self.trim_total > 0 {
-                    format!(
-                        "{} Trimming: {} ({}/{})",
-                        spinner, self.trim_current, self.trim_progress, self.trim_total
-                    )
+                    format!("Trimming: {}", self.trim_current)
                 } else {
-                    format!("{} Preparing to trim...", spinner)
+                    format!("Preparing to trim: {}", self.trim_current)
                 };
 
                 frame.render_widget(
                     Paragraph::new(title)
-                        .style(Style::default().fg(Color::Yellow))
+                        .style(
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        )
                         .centered(),
                     content[0],
                 );
+
+                let label = if self.trim_total > 0 {
+                    Span::styled(
+                        format!(
+                            "{}/{} ({:.0}%)",
+                            self.trim_progress,
+                            self.trim_total,
+                            progress_ratio * 100.0
+                        ),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Span::styled(
+                        "Preparing...",
+                        Style::default().add_modifier(Modifier::ITALIC),
+                    )
+                };
 
                 let gauge = Gauge::default()
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .title("BinTrim - Trimming Applications"),
+                            .title("Trimming Applications"),
                     )
                     .gauge_style(Style::default().fg(Color::Yellow).bg(Color::Black))
-                    .ratio(progress_ratio);
+                    .ratio(progress_ratio)
+                    .label(label);
 
                 frame.render_widget(gauge, content[1]);
             }
@@ -342,20 +384,47 @@ impl App {
             ),
         ]);
 
-        let header = Paragraph::new(header_line)
-            .block(Block::default().borders(Borders::ALL).title(
-            "Applications (Space: toggle | a: select all | Enter: trim | ↑/↓: navigate | q: quit)",
-        ));
+        let sort_indicator = match self.sort_mode {
+            SortMode::Size => "name",
+            SortMode::Alphabetical => "size",
+        };
+
+        let visibility_indicator = if self.show_non_toggleable {
+            "prunable"
+        } else {
+            "all"
+        };
+
+        let title = format!(
+            "Usage: (Space: toggle | a: all | Enter: trim | s: sort by {} | h: show {} | ↑/↓: nav | q: quit)",
+            sort_indicator, visibility_indicator
+        );
+
+        let header =
+            Paragraph::new(header_line).block(Block::default().borders(Borders::ALL).title(title));
 
         frame.render_widget(header, area);
     }
 
     fn render_app_list(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self
+        // Build list of visible indices
+        let visible_indices: Vec<usize> = self
             .apps
             .iter()
             .enumerate()
-            .map(|(i, app)| {
+            .filter(|(_, app)| self.show_non_toggleable || app.has_x86_64())
+            .map(|(i, _)| i)
+            .collect();
+
+        // Find the position of selected_index in the visible list
+        let visible_position = visible_indices
+            .iter()
+            .position(|&i| i == self.selected_index);
+
+        let items: Vec<ListItem> = visible_indices
+            .iter()
+            .map(|&i| {
+                let app = &self.apps[i];
                 let checkbox = if app.has_x86_64() {
                     if app.selected { "[x]" } else { "[ ]" }
                 } else {
@@ -364,18 +433,17 @@ impl App {
 
                 let arch_display = app.architectures_display();
 
-                // Show only x86_64 size (pruneable size)
-                let size_display = if app.has_x86_64() {
-                    format!("{:.2} MB", app.x86_64_size_mb())
-                } else {
-                    "0 MB".to_string()
+                // Show only x86_64 size
+                let size_display = match app.x86_64_size_mb() {
+                    Some(size) if app.has_x86_64() => format!("{:.2} MB", size),
+                    _ => "N/A".to_string(),
                 };
 
                 let line = Line::from(vec![
                     Span::styled(
                         format!("{} ", checkbox),
                         if app.has_x86_64() {
-                            Style::default().fg(Color::Green)
+                            Style::default().fg(Color::White)
                         } else {
                             Style::default().fg(Color::DarkGray)
                         },
@@ -393,7 +461,7 @@ impl App {
 
                 let style = if i == self.selected_index {
                     Style::default()
-                        .bg(Color::DarkGray)
+                        .bg(Color::Rgb(40, 40, 40))
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
@@ -405,7 +473,7 @@ impl App {
 
         let list = List::new(items).block(Block::default().borders(Borders::ALL));
 
-        self.list_state.select(Some(self.selected_index));
+        self.list_state.select(visible_position);
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
@@ -416,7 +484,7 @@ impl App {
             .apps
             .iter()
             .filter(|app| app.has_x86_64())
-            .map(|app| app.x86_64_size_mb())
+            .filter_map(|app| app.x86_64_size_mb())
             .sum();
 
         let selected_apps = self
@@ -429,7 +497,7 @@ impl App {
             .apps
             .iter()
             .filter(|app| app.selected && app.has_x86_64())
-            .map(|app| app.x86_64_size_mb())
+            .filter_map(|app| app.x86_64_size_mb())
             .sum();
 
         let prune_size_display = if estimated_prune_size > 0.0 {
@@ -440,10 +508,7 @@ impl App {
 
         let summary_text = vec![
             Line::from(vec![
-                Span::styled(
-                    "Applications with x86_64: ",
-                    Style::default().fg(Color::White),
-                ),
+                Span::styled("Prunable Applications: ", Style::default().fg(Color::White)),
                 Span::styled(
                     format!("{}", total_apps_with_x86),
                     Style::default()
@@ -452,7 +517,7 @@ impl App {
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Total x86_64 size: ", Style::default().fg(Color::White)),
+                Span::styled("Total pruneable size: ", Style::default().fg(Color::White)),
                 Span::styled(
                     format!("{:.2} MB", total_x86_size),
                     Style::default()
@@ -460,8 +525,9 @@ impl App {
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
+            Line::from(""),
             Line::from(vec![
-                Span::styled("Selected applications: ", Style::default().fg(Color::White)),
+                Span::styled("Selected: ", Style::default().fg(Color::White)),
                 Span::styled(
                     format!("{}", selected_apps),
                     Style::default()
@@ -470,7 +536,7 @@ impl App {
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Estimated prune size: ", Style::default().fg(Color::White)),
+                Span::styled("Prune size: ", Style::default().fg(Color::White)),
                 Span::styled(
                     prune_size_display,
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -488,6 +554,8 @@ impl App {
         let popup_area = Self::centered_rect(50, 30, area);
 
         let text = vec![
+            Line::from(""),
+            Line::from(""),
             Line::from(""),
             Line::from(Span::styled(
                 "No applications selected",
@@ -524,16 +592,17 @@ impl App {
 
         let text = vec![
             Line::from(""),
+            Line::from(""),
+            Line::from(""),
             Line::from(Span::styled(
                 format!("{} Application(s) will be trimmed", selected_count),
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
-            Line::from("This will remove the x86_64 architecture"),
-            Line::from("from the selected applications."),
+            Line::from("This operation requires sudo privileges"),
             Line::from(""),
             Line::from(Span::styled(
-                "Enter sudo password:",
+                "Enter your password",
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
@@ -548,6 +617,7 @@ impl App {
                 "Press Enter to confirm, Esc to cancel",
                 Style::default().fg(Color::DarkGray),
             )),
+            Line::from(""),
         ];
 
         let popup = Paragraph::new(text)
@@ -598,6 +668,8 @@ impl App {
                 (_, KeyCode::Up | KeyCode::Char('k')) => self.move_up(),
                 (_, KeyCode::Char(' ')) => self.toggle_selected(),
                 (_, KeyCode::Char('a')) => self.toggle_select_all(),
+                (_, KeyCode::Char('h')) => self.toggle_visibility(),
+                (_, KeyCode::Char('s')) => self.toggle_sort(),
                 (_, KeyCode::Enter) => self.start_trim(),
                 _ => {}
             },
@@ -630,14 +702,50 @@ impl App {
     }
 
     fn move_down(&mut self) {
-        if !self.apps.is_empty() && self.selected_index < self.apps.len() - 1 {
-            self.selected_index += 1;
+        if self.apps.is_empty() {
+            return;
+        }
+
+        let start_index = self.selected_index;
+        let mut found_next = false;
+
+        // Try to find the next visible item
+        for offset in 1..self.apps.len() {
+            let next_index = (self.selected_index + offset) % self.apps.len();
+            if self.show_non_toggleable || self.apps[next_index].has_x86_64() {
+                self.selected_index = next_index;
+                found_next = true;
+                break;
+            }
+        }
+
+        // If we didn't find anything (shouldn't happen), stay at current position
+        if !found_next {
+            self.selected_index = start_index;
         }
     }
 
     fn move_up(&mut self) {
-        if self.selected_index > 0 {
-            self.selected_index -= 1;
+        if self.apps.is_empty() {
+            return;
+        }
+
+        let start_index = self.selected_index;
+        let mut found_prev = false;
+
+        // Try to find the previous visible item (wrapping around)
+        for offset in 1..self.apps.len() {
+            let prev_index = (self.selected_index + self.apps.len() - offset) % self.apps.len();
+            if self.show_non_toggleable || self.apps[prev_index].has_x86_64() {
+                self.selected_index = prev_index;
+                found_prev = true;
+                break;
+            }
+        }
+
+        // If we didn't find anything (shouldn't happen), stay at current position
+        if !found_prev {
+            self.selected_index = start_index;
         }
     }
 
@@ -707,11 +815,13 @@ impl App {
                     *p = (index + 1, apps_to_trim.len(), app.name.clone());
                 }
 
-                // Remove x86_64 architecture (requires sudo)
+                // Remove x86_64 architecture in-place (requires sudo)
                 let binary_path_str = app.binary_path.to_string_lossy();
-                let temp_path = format!("{}.tmp", binary_path_str);
 
-                // Attempt to remove x86, write to tmp
+                // Get current uid and gid for restoring ownership
+                let uid = unsafe { libc::getuid() };
+                let gid = unsafe { libc::getgid() };
+
                 let lipo_cmd = Command::new("sudo")
                     .arg("-S") // Read password from stdin
                     .arg("lipo")
@@ -719,7 +829,7 @@ impl App {
                     .arg("-remove")
                     .arg("x86_64")
                     .arg("-output")
-                    .arg(&temp_path)
+                    .arg(&*binary_path_str)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
@@ -736,15 +846,15 @@ impl App {
                     if let Ok(status) = child.wait()
                         && status.success()
                     {
-                        // Replace original with temp file using sudo (password should be cached)
-                        let mv_cmd = Command::new("sudo")
+                        // Restore ownership to current user (sudo credentials should be cached)
+                        let chown_cmd = Command::new("sudo")
                             .arg("-n") // Non-interactive, use cached credentials
-                            .arg("mv")
-                            .arg(&temp_path)
+                            .arg("chown")
+                            .arg(format!("{}:{}", uid, gid))
                             .arg(&*binary_path_str)
                             .output();
 
-                        let _ = mv_cmd;
+                        let _ = chown_cmd;
                     }
                 }
             }
@@ -760,5 +870,47 @@ impl App {
 
     fn quit(&mut self) {
         self.running = false;
+    }
+
+    fn toggle_visibility(&mut self) {
+        self.show_non_toggleable = !self.show_non_toggleable;
+        // Reset to first visible item
+        self.selected_index = 0;
+        if !self.show_non_toggleable {
+            // Find first prunable app
+            for (i, app) in self.apps.iter().enumerate() {
+                if app.has_x86_64() {
+                    self.selected_index = i;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn toggle_sort(&mut self) {
+        self.sort_mode = match self.sort_mode {
+            SortMode::Size => SortMode::Alphabetical,
+            SortMode::Alphabetical => SortMode::Size,
+        };
+        self.sort_apps();
+        self.selected_index = 0;
+    }
+
+    fn sort_apps(&mut self) {
+        match self.sort_mode {
+            SortMode::Size => {
+                // Sort by prunable size (largest first), non-prunable apps at the end
+                self.apps
+                    .sort_by(|a, b| match (a.x86_64_size_mb(), b.x86_64_size_mb()) {
+                        (Some(size_a), Some(size_b)) => size_b.partial_cmp(&size_a).unwrap(),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => a.name.cmp(&b.name),
+                    });
+            }
+            SortMode::Alphabetical => {
+                self.apps.sort_by(|a, b| a.name.cmp(&b.name));
+            }
+        }
     }
 }
